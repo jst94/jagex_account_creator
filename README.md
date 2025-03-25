@@ -15,6 +15,7 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 
 ## Notable not-features
 * If for some reason the creator fails during a run, it likely won't cleanup the temporary run folder it creates.
+* * A failed run in headless mode will leave behind a chrome process that you'll need to end.
 * If you get a Cloudflare checkbox, your IP is likely temporarily flagged.
 * * There is an idea to always check for a Cloudflare checkbox and solve it but it's not implemented as you should be rotating IPs anyways.
 * It's possible for the randomly generated username to be `not allowed` by Jagex which will make the creation fail.
