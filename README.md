@@ -2,7 +2,9 @@
 Utilizes the Python DrissionPage library to automate a Chrome browser and sign up for a new Jagex account.
 
 ## Notable features:
-* Multi-threaded - You can make as many accounts at once as you have computer resources / proxies for.
+* Takes ~15 seconds per account without 2FA enabled. 
+* Takes ~30 seconds per account with 2FA enabled.
+* Multi-threaded - You can make as many accounts as you want in 15-30 seconds as long as you have computer resources / proxies to handle the threads!
 * Supports headless mode.
 * ~10MB of data usage pre-cache, 900kb of data usage post-cache!
 * * Sets up a local proxy server that intercepts all of the Chrome traffic and blocks requests that aren't required.
