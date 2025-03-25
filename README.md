@@ -17,6 +17,9 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * If for some reason the creator fails during a run, it likely won't cleanup the temporary run folder it creates.
 * If you get a Cloudflare checkbox, your IP is likely temporarily flagged.
 * * There is an idea to always check for a Cloudflare checkbox and solve it but it's not implemented as you should be rotating IPs anyways.
+* It's possible for the randomly generated username to be `not allowed` by Jagex which will make the creation fail.
+* * I feel like I've seen the list of restrictions somewhere when looking at the requests but can't remember.
+* * The ideal fix would be to create a username accounting for those restrictions.
 
 # Contact
 My only discord is `gavinnn`.
