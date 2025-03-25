@@ -508,10 +508,10 @@ class AccountCreator:
                 f"Got 2fa backup codes: {registration_info['2fa']['backup_codes']}"
             )
 
+        self._save_account_to_file(registration_info)
+
         # Close browser before deleting run folder
         browser.close_tabs(tab)
-
-        self._save_account_to_file(registration_info)
 
         run_cache_path = run_path / "cache"
         if os.path.isdir(self.cache_folder):
