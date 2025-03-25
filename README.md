@@ -23,5 +23,20 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * * I feel like I've seen the list of restrictions somewhere when looking at the requests but can't remember.
 * * The ideal fix would be to create a username accounting for those restrictions.
 
+## Setup
+
+* Download the repository - https://github.com/gavinnn101/jagex_account_creator/archive/refs/heads/main.zip
+* * Unzip the download to the location of your choice.
+* Open a terminal in the root folder of your download.
+* run `pip install -r .\requirements.txt` to install the script dependencies.
+* Open `$script_root/src/config.ini` and edit the settings accordingly.
+* * You'll need to edit:
+* * * `account.domains`
+* * * `account.password`
+* * * `imap.ip`
+* * * `imap.email`
+* * * `imap.password`
+* Back in your terminal, run `python .\src\main.py`
+
 # Contact
 My only discord is `gavinnn` (uid: `132269908628078592`)
