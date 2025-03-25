@@ -24,4 +24,4 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * * The ideal fix would be to create a username accounting for those restrictions.
 
 # Contact
-My only discord is `gavinnn`.
+My only discord is `gavinnn` (uid: `132269908628078592`)
