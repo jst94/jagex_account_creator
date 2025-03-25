@@ -12,6 +12,7 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * Utilizes a catch-all email via imap for easy and quick account verification.
 * * All domains used for accounts should point to the single catch-all email being used with imap.
 * Supports enabling OTP 2FA on accounts.
+* Each successful account creation saves all of the registration info used to `accounts.json`.
 
 ## Notable not-features
 * If for some reason the creator fails during a run, it likely won't cleanup the temporary run folder it creates.
