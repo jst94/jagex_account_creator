@@ -16,6 +16,7 @@ from DrissionPage.common import Settings
 from DrissionPage.items import ChromiumElement, MixTab
 from imap_tools import AND, MailBox
 from loguru import logger
+
 from proxies.proxy_extension import create_proxy_extension
 from traffic_filter_proxy_server import TrafficFilterProxy
 
@@ -114,15 +115,12 @@ class AccountCreator:
         co.set_argument(f"--disk-cache-dir={new_cache_folder}")
 
     def get_new_browser(
-        self, run_path: Path, run_number: int, proxy_extension_path: Path = None
+        self, run_path: Path, proxy_extension_path: Path = None
     ) -> Chromium:
         """Creates a new browser tab with temp settings and an open port."""
         co = ChromiumOptions()
+        co.auto_port()
 
-        # TODO: Investigate why auto_port doesn't seem to create different browsers even though documentation says it should.
-        # co.auto_port()
-
-        co.set_local_port(run_number)
         co.mute()
         # co.no_imgs()  # no_imgs() seems to cause cloudflare challenge to infinite loop
 
@@ -394,9 +392,9 @@ class AccountCreator:
                 plugin_path=proxy_extension_dir,
             )
 
-            browser = self.get_new_browser(run_path, run_number, proxy_extension_path)
+            browser = self.get_new_browser(run_path, proxy_extension_path)
         else:
-            browser = self.get_new_browser(run_path, run_number)
+            browser = self.get_new_browser(run_path)
 
         tab = browser.latest_tab
         tab.set.auto_handle_alert()
