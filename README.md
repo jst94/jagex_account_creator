@@ -10,7 +10,6 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * * Sets up a local proxy server that intercepts all of the Chrome traffic and blocks requests that aren't required.
 * * Elements that can't be blocked are saved to a cache that is shared by all runs and frequently updated.
 * Utilizes a catch-all email via imap for easy and quick account verification.
-* * All domains used for accounts should point to the single catch-all email being used with imap.
 * Supports enabling OTP 2FA on accounts.
 * Each successful account creation appends the account and all of the registration info used to `accounts.json`.
 
@@ -29,7 +28,7 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * * Unzip the download to the location of your choice.
 * Open a terminal in the root folder of your download.
 * run `pip install -r .\requirements.txt` to install the script dependencies.
-* Open `$script_root/src/config.ini` and edit the settings accordingly.
+* Open `$script_root\src\config.ini` and edit the settings accordingly.
 * * You'll need to edit:
 * * * `account.domains`
 * * * `account.password`
@@ -37,6 +36,22 @@ Utilizes the Python DrissionPage library to automate a Chrome browser and sign u
 * * * `imap.email`
 * * * `imap.password`
 * Back in your terminal, run `python .\src\main.py`
+
+### IMAP / Domains Explanation
+Your `imap.email` should have a catch-all alias pointing to it for all domains listed under `account.domains`
+```
+[accounts]
+domains = mydomain1.com,myotherdomain.net
+
+[imap]
+email = catchAll@mydomain.com
+
+> Account creator tries to make abcd123@mydomain1.com
+> Account creator signs into catchAll@mydomain.com via imap and waits for an email addressed to abcd123@mydomain1.com.
+
+> Account creator tries to make abcd123@myotherdomain.net
+> Account creator signs into catchAll@mydomain.com via imap and waits for an email addressed to abcd123@myotherdomain.net.
+```
 
 # Contact
 My only discord is `gavinnn` (uid: `132269908628078592`)
