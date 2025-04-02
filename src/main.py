@@ -23,6 +23,10 @@ from traffic_filter_proxy_server import TrafficFilterProxy
 SCRIPT_DIR = Path(os.path.dirname(os.path.realpath(__file__)))
 
 
+# Custom Exception for teardown scenarios
+class RegistrationError(Exception):
+    pass
+
 class AccountCreator:
     def __init__(self) -> None:
         self.config = configparser.ConfigParser()
@@ -210,11 +214,78 @@ class AccountCreator:
             tab.actions.move_to(element).click().type(text)
         return element
 
+    # Modified teardown: Raise a specific exception instead of exiting
     def teardown(self, tab: MixTab, exit_status: str) -> None:
-        """Closes tab and exits."""
-        logger.info(f"Exiting with status: {exit_status}")
-        tab.close()
-        sys.exit(exit_status)
+        """Logs status and raises an exception to signal failure."""
+        logger.error(f"Registration failed: {exit_status}")
+        if tab and tab.driver: # Check if tab and driver exist
+            try:
+                tab.close()
+            except Exception as e:
+                logger.warning(f"Error closing tab during teardown: {e}")
+        raise RegistrationError(exit_status) # Raise exception
+
+    def find_element(
+        self, tab: MixTab, identifier: str, teardown: bool = True
+    ) -> ChromiumElement | None: # Added None return type hint
+        """Tries to find an element in the tab."""
+        logger.debug(f"Looking for element with identifier: {identifier}")
+        try:
+            logger.debug("Waiting for element to be loaded")
+            # Use wait.ele_displayed directly as it implies loaded and visible
+            element = tab.wait.ele_displayed(identifier, timeout=self.element_wait_timeout)
+            if not element:
+                raise TimeoutError(f"Element '{identifier}' not displayed within timeout.")
+
+            logger.debug("Returning element")
+            return element # Return the found element directly
+        except Exception as e:
+            error_msg = f"Error finding element '{identifier}': {e}"
+            if teardown:
+                self.teardown(tab, error_msg)
+            else:
+                logger.warning(error_msg)
+                return None # Return None if not tearing down
+
+    def click_element(
+        self, tab: MixTab, identifier: str, teardown: bool = True
+    ) -> ChromiumElement | None: # Added None return type hint
+        element = self.find_element(tab, identifier, teardown)
+        if element:
+            try:
+                logger.debug(f"Clicking element: {identifier}")
+                # DrissionPage recommends using element.click() directly if possible
+                element.click()
+                # tab.actions.move_to(element).click() # Keep as fallback if direct click fails
+            except Exception as e:
+                error_msg = f"Error clicking element '{identifier}': {e}"
+                if teardown:
+                    self.teardown(tab, error_msg)
+                else:
+                    logger.warning(error_msg)
+                    return None # Return None on click failure if not tearing down
+        return element # Return element if found, None otherwise or if click failed without teardown
+
+    def click_and_type(
+        self, tab: MixTab, identifier: str, text: str, teardown: bool = True
+    ) -> ChromiumElement | None: # Added None return type hint
+        """Clicks on an element and then types the text."""
+        element = self.find_element(tab, identifier, teardown)
+        if element:
+            try:
+                logger.debug(f"Clicking element '{identifier}' and then typing: {'*' * len(text) if 'password' in identifier else text}") # Mask password
+                # Combine actions for efficiency if possible, or ensure element is ready
+                element.click() # Ensure focus
+                element.input(text) # Use input for typing
+                # tab.actions.move_to(element).click().type(text) # Keep as fallback
+            except Exception as e:
+                error_msg = f"Error clicking/typing in element '{identifier}': {e}"
+                if teardown:
+                    self.teardown(tab, error_msg)
+                else:
+                    logger.warning(error_msg)
+                    return None # Return None on type failure if not tearing down
+        return element # Return element if found, None otherwise or if type failed without teardown
 
     def check_for_challenge(self, tab: MixTab) -> bool:
         """Checks if we got a CF challenge on the page."""
@@ -276,21 +347,43 @@ class AccountCreator:
 
     def _get_verification_code(self, tab: MixTab, account_email: str) -> str:
         """Gets the verification code from catch all email via imap"""
+        logger.info(f"Attempting to retrieve verification code for {account_email}")
         email_query = AND(to=account_email, seen=False)
-        code_regex = (
-            r'data-testid="registration-started-verification-code"[^>]*>([A-Z0-9]+)<'
-        )
-        with MailBox(self.imap_details["ip"], self.imap_details["port"]).login(
-            self.imap_details["email"], self.imap_details["password"]
-        ) as mailbox:
-            for _ in range(self.element_wait_timeout * 10):
-                emails = mailbox.fetch(email_query)
-                for email in emails:
-                    match = re.search(code_regex, email.html)
-                    if match:
-                        return match.group(1)
-                time.sleep(0.1)
-        self.teardown(tab, "Verification code pattern not found in email")
+        # Consider making regex slightly more robust if format changes
+        code_regex = r'data-testid="registration-started-verification-code"[^>]*>([A-Z0-9]+)<'
+        mailbox = None
+        try:
+            # Use context manager for MailBox connection
+            with MailBox(self.imap_details["ip"], self.imap_details["port"]).login(
+                self.imap_details["email"], self.imap_details["password"], initial_folder='INBOX' # Specify inbox
+            ) as mailbox:
+                # Increased timeout slightly, consider making configurable
+                for i in range(self.element_wait_timeout * 12): # e.g. 120 seconds if timeout is 10
+                    logger.debug(f"Checking email attempt {i+1}...")
+                    # Fetch unseen emails matching the recipient
+                    emails = list(mailbox.fetch(email_query, limit=5, mark_seen=False)) # Keep unseen, limit fetch
+                    if not emails:
+                        logger.debug("No matching emails found yet.")
+                    for email in emails:
+                        logger.debug(f"Found email: Subject='{email.subject}', From='{email.from_}', To='{email.to}'")
+                        # Check HTML content for the code
+                        if email.html:
+                            match = re.search(code_regex, email.html)
+                            if match:
+                                code = match.group(1)
+                                logger.info(f"Found verification code: {code}")
+                                # Mark this specific email as seen after finding code
+                                mailbox.flag([email.uid], '\\Seen', True)
+                                return code
+                        else:
+                            logger.warning(f"Email UID {email.uid} has no HTML content.")
+                    time.sleep(1) # Wait 1 second between checks
+            # If loop finishes without finding code
+            self.teardown(tab, f"Verification code not found for {account_email} within timeout.")
+        except Exception as e:
+            # Catch potential IMAP connection errors or other issues
+            self.teardown(tab, f"Error accessing IMAP server or fetching email: {e}")
+
 
     def _verify_account_creation(self, tab: MixTab) -> bool:
         """Checks to see if we landed on the registration completed page."""
@@ -321,244 +414,285 @@ class AccountCreator:
         accounts[registration_info["email"]] = registration_info
         self._save_accounts(accounts)
 
-    def register_account(self) -> None:
-        """Wrapper function to fully register a Jagex account."""
+    # Refactored register_account with try...finally and status return
+    def register_account(self) -> tuple[bool, str, dict | None]:
+        """
+        Wrapper function to fully register a Jagex account.
+        Returns:
+            tuple[bool, str, dict | None]: (success_status, message, registration_info or None)
+        """
         registration_info = {
-            "email": None,
-            "password": self.password,
+            "email": None, "password": self.password,
             "birthday": {"day": None, "month": None, "year": None},
-            "proxy": {
-                "enabled": self.use_proxies,
-                "real_ip": None,
-                "host": None,
-                "port": None,
-                "username": None,
-                "password": None,
-            },
+            "proxy": {"enabled": self.use_proxies, "real_ip": None, "host": None, "port": None, "username": None, "password": None},
             "2fa": {"enabled": self.set_2fa, "setup_key": None, "backup_codes": None},
+            "status": "pending", "message": ""
         }
-
         run_number = random.randint(10_000, 65_535)
-
-        # Create tmp dir for this run
         run_path = SCRIPT_DIR / f"run_{run_number}"
-        os.mkdir(run_path)
+        browser = None
+        tab = None
+        filter_proxy = None
+        proxy_extension_path = None
 
-        if self.use_proxies:
-            proxy_extension_dir = run_path / "proxy_extension"
-            proxy = self.get_next_proxy()
-            logger.debug(f"Returning browser with proxy: {proxy}")
+        try:
+            os.makedirs(run_path, exist_ok=True) # Use exist_ok=True
 
-            # Parse proxy string
-            proxy_parts = proxy.split(":")
+            # --- Proxy Setup ---
+            if self.use_proxies:
+                proxy_extension_dir = run_path / "proxy_extension"
+                proxy = self.get_next_proxy()
+                logger.info(f"Using proxy: {proxy} for run {run_number}")
+                proxy_parts = proxy.split(":")
+                if len(proxy_parts) not in [2, 4]:
+                    raise RegistrationError(f"Invalid proxy format: {proxy}")
 
-            # Validate proxy format
-            if len(proxy_parts) not in [2, 4]:
-                logger.error(
-                    f"Proxy ({proxy}) doesn't split into ip:port or ip:port:user:pass"
+                proxy_host, proxy_port = proxy_parts[0], proxy_parts[1]
+                registration_info["proxy"].update({"host": proxy_host, "port": proxy_port})
+                if len(proxy_parts) == 4:
+                    proxy_username, proxy_password = proxy_parts[2], proxy_parts[3]
+                    registration_info["proxy"].update({"username": proxy_username, "password": proxy_password})
+
+                filter_proxy = TrafficFilterProxy(
+                    allowed_url_patterns=["jagex", "cloudflare", "ipify"],
+                    upstream_proxy=registration_info["proxy"],
                 )
-                sys.exit("Invalid proxy")
+                filter_proxy.start_daemon()
+                logger.info(f"Traffic filter proxy started on {filter_proxy.ip}:{filter_proxy.port}")
 
-            # Extract proxy details
-            proxy_host, proxy_port = proxy_parts[0], proxy_parts[1]
-
-            # Set auth if provided
-            if len(proxy_parts) == 4:
-                proxy_username, proxy_password = proxy_parts[2], proxy_parts[3]
-
-                # Store in registration info
-                registration_info["proxy"].update(
-                    {"username": proxy_username, "password": proxy_password}
+                proxy_extension_path = create_proxy_extension(
+                    proxy_host=filter_proxy.ip, proxy_port=filter_proxy.port,
+                    plugin_path=proxy_extension_dir,
                 )
+            # --- End Proxy Setup ---
 
-            # Update registration info with host and port (always needed)
-            registration_info["proxy"].update({"host": proxy_host, "port": proxy_port})
-
-            # Start proxy server to intercept requests
-            filter_proxy = TrafficFilterProxy(
-                allowed_url_patterns=[
-                    "jagex",
-                    "cloudflare",
-                    "ipify",
-                ],
-                upstream_proxy=registration_info["proxy"],
-            )
-            filter_proxy.start_daemon()
-
-            # Create proxy extension
-            proxy_extension_path = create_proxy_extension(
-                proxy_host=filter_proxy.ip,
-                proxy_port=filter_proxy.port,
-                plugin_path=proxy_extension_dir,
-            )
-
+            # --- Browser Setup ---
+            logger.info("Setting up browser...")
             browser = self.get_new_browser(run_path, proxy_extension_path)
-        else:
-            browser = self.get_new_browser(run_path)
+            tab = browser.latest_tab
+            tab.set.auto_handle_alert()
+            # tab.set.blocked_urls = self.urls_to_block # Consider if still needed with filter proxy
+            tab.run_cdp("Network.enable")
+            tab.run_cdp("Network.setBlockedURLs", urls=self.urls_to_block)
+            logger.info("Browser setup complete.")
+            time.sleep(2) # Allow extensions/proxy to load
+            # --- End Browser Setup ---
 
-        tab = browser.latest_tab
-        tab.set.auto_handle_alert()
+            # --- Initial Navigation & Checks ---
+            browser_ip = self.get_browser_ip(tab) # Can raise RegistrationError via teardown
+            logger.info(f"Browser IP: {browser_ip}")
+            registration_info["proxy"]["real_ip"] = browser_ip
 
-        # tab.set.blocked_urls = self.urls_to_block
-        tab.run_cdp("Network.enable")
-        tab.run_cdp("Network.setBlockedURLs", urls=self.urls_to_block)
+            logger.info(f"Navigating to registration URL: {self.registration_url}")
+            if not tab.get(self.registration_url):
+                self.teardown(tab, f"Failed to navigate to URL: {self.registration_url}") # Raises RegistrationError
 
-        # wait a second before starting otherwise our proxy might not be loaded yet..
-        time.sleep(2)
+            # Wait for title explicitly after navigation
+            if not tab.wait.title_change("Create a Jagex account", timeout=15):
+                 # Check for block page before teardown
+                if "Sorry, you have been blocked" in tab.html:
+                     self.teardown(tab, "IP is blocked by Cloudflare.")
+                self.teardown(tab, "Failed to load registration page (title mismatch or timeout).")
 
-        browser_ip = self.get_browser_ip(tab)
-        logger.info(f"Browser IP: {browser_ip}")
-        registration_info["proxy"]["real_ip"] = browser_ip
+            # Check for challenge *after* page load attempt
+            if self.check_for_challenge(tab):
+                logger.info("Cloudflare challenge detected. Attempting bypass...")
+                if not self.bypass_challenge(tab):
+                    self.teardown(tab, "Failed to bypass Cloudflare challenge.")
+                logger.info("Cloudflare challenge likely bypassed.")
+                # Re-verify title after potential bypass navigation
+                if not tab.wait.title_change("Create a Jagex account", timeout=15):
+                     self.teardown(tab, "Failed to reach registration page after CF bypass.")
 
-        if not tab.get(self.registration_url):
-            self.teardown(f"Failed to go to url: {self.registration_url}")
-        tab.wait.title_change("Create a Jagex account")
-        tab.wait.url_change(self.registration_url)
+            # self.click_element(tab, "#CybotCookiebotDialogBodyButtonDecline", False) # Optional cookie decline
+            # --- End Initial Navigation & Checks ---
 
-        if "Sorry, you have been blocked" in tab.html:
-            self.teardown(tab, "IP is blocked by CF. Exiting.")
+            # --- Registration Form ---
+            username = self.generate_username()
+            domain = self.get_account_domain()
+            registration_info["email"] = f"{username}@{domain}"
+            logger.info(f"Generated email: {registration_info['email']}")
 
-        # self.click_element(tab, "#CybotCookiebotDialogBodyButtonDecline", False)
+            registration_info["birthday"]["day"] = random.randint(1, 25)
+            registration_info["birthday"]["month"] = random.randint(1, 12)
+            registration_info["birthday"]["year"] = random.randint(1979, 2010) # Ensure age is valid
+            bday_str = f"{registration_info['birthday']['day']}/{registration_info['birthday']['month']}/{registration_info['birthday']['year']}"
+            logger.info(f"Generated birthday: {bday_str}")
 
-        username = self.generate_username()
-        domain = self.get_account_domain()
-        registration_info["email"] = f"{username}@{domain}"
+            self.click_and_type(tab, "@id:email", registration_info["email"])
+            self.click_and_type(tab, "@id:registration-start-form--field-day", str(registration_info["birthday"]["day"]))
+            self.click_and_type(tab, "@id:registration-start-form--field-month", str(registration_info["birthday"]["month"]))
+            self.click_and_type(tab, "@id:registration-start-form--field-year", str(registration_info["birthday"]["year"]))
+            self.click_element(tab, "@id:registration-start-accept-agreements")
+            self.click_element(tab, "@id:registration-start-form--continue-button")
+            tab.wait.doc_loaded() # Wait for next step page
+            logger.info("Filled initial registration form.")
+            # --- End Registration Form ---
 
-        registration_info["birthday"]["day"] = random.randint(1, 25)
-        registration_info["birthday"]["month"] = random.randint(1, 12)
-        registration_info["birthday"]["year"] = random.randint(1979, 2010)
+            # --- Email Verification ---
+            code = self._get_verification_code(tab, registration_info["email"]) # Can raise RegistrationError
+            self.click_and_type(tab, "@id:registration-verify-form-code-input", code)
+            self.click_element(tab, "@id:registration-verify-form-continue-button")
+            tab.wait.doc_loaded()
+            logger.info("Email verification submitted.")
+            # --- End Email Verification ---
 
-        self.click_and_type(tab, "@id:email", registration_info["email"])
-        self.click_and_type(
-            tab,
-            "@id:registration-start-form--field-day",
-            registration_info["birthday"]["day"],
-        )
-        self.click_and_type(
-            tab,
-            "@id:registration-start-form--field-month",
-            registration_info["birthday"]["month"],
-        )
-        self.click_and_type(
-            tab,
-            "@id:registration-start-form--field-year",
-            registration_info["birthday"]["year"],
-        )
-        self.click_element(tab, "@id:registration-start-accept-agreements")
-        self.click_element(tab, "@id:registration-start-form--continue-button")
-        tab.wait.doc_loaded()
-
-        code = self._get_verification_code(tab, username)
-        if not code:
-            self.teardown(tab, "Failed to get registration verification code.")
-        self.click_and_type(tab, "@id:registration-verify-form-code-input", code)
-        self.click_element(tab, "@id:registration-verify-form-continue-button")
-        tab.wait.doc_loaded()
-
-        self.click_and_type(tab, "@id:displayName", username)
-        self.click_element(tab, "@id:registration-account-name-form--continue-button")
-        tab.wait.doc_loaded()
-
-        self.click_and_type(tab, "@id:password", self.password)
-        self.click_and_type(tab, "@id:repassword", self.password)
-        self.click_element(tab, "@id:registration-password-form--create-account-button")
-        tab.wait.doc_loaded()
-
-        if not self._verify_account_creation(tab):
-            self.teardown(tab, "Failed to verify account creation.")
-
-        if self.set_2fa:
-            logger.debug("Going to management page")
-            if not tab.get(self.management_url):
-                self.teardown(tab, "Failed to get to the account management page.")
-            tab.wait.url_change(self.management_url)
+            # --- Account Name & Password ---
+            self.click_and_type(tab, "@id:displayName", username) # Use generated username
+            self.click_element(tab, "@id:registration-account-name-form--continue-button")
             tab.wait.doc_loaded()
 
-            self.click_element(tab, "@data-testid:mfa-enable-totp-button")
+            self.click_and_type(tab, "@id:password", self.password)
+            self.click_and_type(tab, "@id:repassword", self.password)
+            self.click_element(tab, "@id:registration-password-form--create-account-button")
+            tab.wait.doc_loaded()
+            logger.info("Account name and password submitted.")
+            # --- End Account Name & Password ---
 
-            self.click_element(tab, "@id:authentication-setup-show-secret")
+            # --- Verify Creation & Optional 2FA ---
+            if not self._verify_account_creation(tab):
+                self.teardown(tab, "Failed to verify account creation (final page title mismatch).")
+            logger.info("Account creation verified.")
 
-            # Extract setup key after clicking the button to show it
-            setup_key_element = self.find_element(
-                tab, "@id:authentication-setup-secret-key"
-            )
-            registration_info["2fa"]["setup_key"] = setup_key_element.text
-            logger.debug(
-                f"Extracted 2fa setup key: {registration_info['2fa']['setup_key']}"
-            )
+            if self.set_2fa:
+                logger.info("Setting up 2FA...")
+                if not tab.get(self.management_url):
+                    self.teardown(tab, "Failed to navigate to account management page for 2FA.")
+                tab.wait.url_change(self.management_url)
+                tab.wait.doc_loaded()
 
-            self.click_element(tab, "@data-testid:authenticator-setup-qr-button")
+                self.click_element(tab, "@data-testid:mfa-enable-totp-button")
+                tab.wait.doc_loaded() # Wait for 2FA setup section
 
-            # generate totp using the setup key here
-            totp = pyotp.TOTP(registration_info["2fa"]["setup_key"]).now()
-            logger.debug(f"Generated TOTP code: {totp}")
+                self.click_element(tab, "@id:authentication-setup-show-secret")
 
-            self.click_and_type(tab, "@id:authentication-setup-verification-code", totp)
-            self.click_element(
-                tab, "@data-testid:authentication-setup-qr-code-submit-button"
-            )
+                setup_key_element = self.find_element(tab, "@id:authentication-setup-secret-key")
+                if not setup_key_element or not setup_key_element.text:
+                     self.teardown(tab, "Could not find or read 2FA setup key element.")
+                registration_info["2fa"]["setup_key"] = setup_key_element.text.strip() # Add strip()
+                logger.debug(f"Extracted 2FA setup key: {registration_info['2fa']['setup_key']}")
 
-            backup_codes_element = self.find_element(
-                tab, "@id:authentication-setup-complete-codes"
-            )
-            registration_info["2fa"]["backup_codes"] = backup_codes_element.text.split(
-                "\n"
-            )
-            logger.debug(
-                f"Got 2fa backup codes: {registration_info['2fa']['backup_codes']}"
-            )
+                # It might be safer to click the button *before* generating the TOTP
+                self.click_element(tab, "@data-testid:authenticator-setup-qr-button") # Continue button
 
-        self._save_account_to_file(registration_info)
+                totp_code = pyotp.TOTP(registration_info["2fa"]["setup_key"]).now()
+                logger.debug(f"Generated TOTP code: {totp_code}")
 
-        # Close browser before deleting run folder
-        browser.close_tabs(tab)
+                self.click_and_type(tab, "@id:authentication-setup-verification-code", totp_code)
+                self.click_element(tab, "@data-testid:authentication-setup-qr-code-submit-button")
+                tab.wait.doc_loaded() # Wait for backup codes page
 
-        run_cache_path = run_path / "cache"
-        if os.path.isdir(self.cache_folder):
-            run_cache_size = self.get_dir_size(run_cache_path)
-            original_cache_size = self.get_dir_size(self.cache_folder)
-            if original_cache_size == 0:
-                if run_cache_size == 0:
-                    size_diff_percent = 0  # Both are zero, so no difference
-                else:
-                    size_diff_percent = 100  # New cache exists but original was empty
-            else:
-                size_diff_percent = (
-                    abs(run_cache_size - original_cache_size)
-                    / original_cache_size
-                    * 100
-                )
-            logger.debug(f"run cache size: {run_cache_size}")
-            logger.debug(f"original cache size: {original_cache_size}")
-            logger.debug(f"Size difference %: {size_diff_percent}")
-            if size_diff_percent >= self.cache_update_threshold:
-                with self.cache_folder_lock:
-                    logger.debug(
-                        f"Updating cache file with run cache: {run_cache_path}"
-                    )
-                    shutil.rmtree(self.cache_folder)
+                backup_codes_element = self.find_element(tab, "@id:authentication-setup-complete-codes")
+                if not backup_codes_element or not backup_codes_element.text:
+                     self.teardown(tab, "Could not find or read 2FA backup codes element.")
+                # Split codes and filter empty lines
+                backup_codes = [code.strip() for code in backup_codes_element.text.split('\n') if code.strip()]
+                registration_info["2fa"]["backup_codes"] = backup_codes
+                logger.info(f"Successfully set up 2FA. Got {len(backup_codes)} backup codes.")
+            # --- End Verify Creation & Optional 2FA ---
+
+            # --- Success ---
+            registration_info["status"] = "success"
+            registration_info["message"] = "Account registered successfully."
+            self._save_account_to_file(registration_info)
+            logger.info(f"Successfully registered and saved account: {registration_info['email']}")
+            return True, registration_info["message"], registration_info
+            # --- End Success ---
+
+        except RegistrationError as e:
+            # Logged in teardown, just return failure status
+            registration_info["status"] = "failed"
+            registration_info["message"] = str(e)
+            return False, str(e), registration_info
+        except Exception as e:
+            # Catch unexpected errors
+            logger.exception(f"An unexpected error occurred during registration for run {run_number}: {e}")
+            # Try to teardown gracefully if tab exists
+            if tab:
+                try:
+                    tab.close()
+                except: pass # Ignore errors during cleanup teardown
+            registration_info["status"] = "failed"
+            registration_info["message"] = f"Unexpected error: {e}"
+            return False, registration_info["message"], registration_info
+        finally:
+            # --- Cleanup ---
+            logger.debug(f"Starting cleanup for run {run_number}")
+            if browser:
+                try:
+                    logger.debug("Closing browser...")
+                    browser.quit() # Use quit() for the whole browser
+                except Exception as e:
+                    logger.warning(f"Error closing browser: {e}")
+
+            # Cache update logic (keep as is for now, but consider GUI control later)
+            run_cache_path = run_path / "cache"
+            if os.path.isdir(run_cache_path) and os.path.isdir(self.cache_folder):
+                 try:
+                    run_cache_size = self.get_dir_size(run_cache_path)
+                    original_cache_size = self.get_dir_size(self.cache_folder)
+                    if original_cache_size == 0:
+                        size_diff_percent = 100 if run_cache_size > 0 else 0
+                    else:
+                        size_diff_percent = (abs(run_cache_size - original_cache_size) / original_cache_size * 100)
+
+                    logger.debug(f"Run cache size: {run_cache_size}, Original cache size: {original_cache_size}, Diff: {size_diff_percent:.2f}%")
+                    if size_diff_percent >= self.cache_update_threshold:
+                        with self.cache_folder_lock:
+                            logger.info(f"Updating main cache from run {run_number} cache (diff >= {self.cache_update_threshold}%).")
+                            shutil.rmtree(self.cache_folder)
+                            shutil.copytree(run_cache_path, self.cache_folder)
+                 except Exception as e:
+                     logger.warning(f"Error updating cache: {e}")
+            elif os.path.isdir(run_cache_path) and not os.path.isdir(self.cache_folder):
+                 try:
+                    logger.info("Main cache doesn't exist. Copying run cache to main cache.")
                     shutil.copytree(run_cache_path, self.cache_folder)
-        else:
-            logger.debug("primary cache doesn't exist. Copying run cache to primary.")
-            shutil.copytree(run_cache_path, self.cache_folder)
-
-        logger.debug(f"Deleting run temp folder: {run_path}")
-        shutil.rmtree(run_path)
-
-        if self.use_proxies:
-            logger.debug("Stopping traffic filter proxy server.")
-            filter_proxy.stop()
-
-        logger.info("Registration finished")
+                 except Exception as e:
+                     logger.warning(f"Error copying initial cache: {e}")
 
 
+            if os.path.exists(run_path):
+                try:
+                    logger.debug(f"Deleting run temp folder: {run_path}")
+                    shutil.rmtree(run_path)
+                except Exception as e:
+                    logger.warning(f"Error deleting run folder {run_path}: {e}")
+
+            if filter_proxy:
+                try:
+                    logger.debug("Stopping traffic filter proxy server.")
+                    filter_proxy.stop()
+                except Exception as e:
+                    logger.warning(f"Error stopping filter proxy: {e}")
+            logger.debug(f"Cleanup finished for run {run_number}")
+            # --- End Cleanup ---
+
+# Keep main function for standalone execution, but GUI will bypass this
 def main():
-    ac = AccountCreator()
+    # Basic logging setup if run standalone
+    logger.add("account_creator.log", rotation="10 MB", level="DEBUG")
+    logger.info("Starting Account Creator (standalone mode)...")
 
-    for _ in range(0, ac.threads):
-        threading.Thread(target=ac.register_account).start()
-        time.sleep(1)
+    try:
+        ac = AccountCreator()
+    except Exception as e:
+        logger.exception(f"Failed to initialize AccountCreator: {e}")
+        sys.exit(f"Initialization Error: {e}")
 
+    threads = []
+    for i in range(ac.threads):
+        logger.info(f"Starting thread {i+1}/{ac.threads}")
+        thread = threading.Thread(target=ac.register_account, daemon=True) # Use daemon threads
+        threads.append(thread)
+        thread.start()
+        time.sleep(1) # Stagger start
+
+    # Wait for threads to complete (optional, maybe add timeout)
+    for thread in threads:
+        thread.join()
+
+    logger.info("All threads finished.")
 
 if __name__ == "__main__":
     main()
