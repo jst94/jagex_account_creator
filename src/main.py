@@ -29,7 +29,7 @@ class RegistrationError(Exception):
 
 class AccountCreator:
     def __init__(self) -> None:
-        self.config = configparser.ConfigParser()
+        self.config = configparser.RawConfigParser()
         self.config.read(SCRIPT_DIR / "config.ini")
         self.registration_url = (
             "https://account.jagex.com/en-GB/login/registration-start"
@@ -121,49 +121,82 @@ class AccountCreator:
     def get_new_browser(
         self, run_path: Path, proxy_extension_path: Path = None
     ) -> Chromium:
-        """Creates a new browser tab with temp settings and an open port."""
+        """Creates a new browser tab with settings optimized for avoiding detection."""
         co = ChromiumOptions()
         co.auto_port()
 
-        co.mute()
-        # co.no_imgs()  # no_imgs() seems to cause cloudflare challenge to infinite loop
+        # Reduce fingerprinting
+        co.set_argument("--disable-blink-features=AutomationControlled")
+        co.set_argument("--disable-features=IsolateOrigins,site-per-process")
+        co.set_argument("--disable-web-security")
+        co.set_argument("--ignore-certificate-errors")
+        co.set_argument("--ignore-certificate-errors-spki-list")
+        co.set_argument("--disable-site-isolation-trials")
 
-        # Disable chrome optimization features to save on bandwidth
-        # https://source.chromium.org/chromium/chromium/src/+/main:components/optimization_guide/core/optimization_guide_features.cc;l=49-71
-        # TODO: Investigate why this doesn't work. Not sure if its DrissionPage not setting them correctly or a different issue.
-        # co.set_argument(
-        #     "--disable-features=OptimizationGuideModelDownloading,OptimizationHints,OptimizationHintsFetching,OptimizationHintsFetchingAnonymousDataConsent,OptimizationTargetPrediction"
-        # )
+        # Random window size to avoid detection
+        width = random.randint(1024, 1920)
+        height = random.randint(768, 1080)
+        co.set_argument(f"--window-size={width},{height}")
+        
+        # Timezone randomization (close to target region)
+        timezones = ['Europe/London', 'Europe/Paris', 'Europe/Berlin']
+        co.set_argument(f"--timezone={random.choice(timezones)}")
 
+        # Set random language from common English variants
+        languages = ['en-US', 'en-GB', 'en-CA']
+        co.set_argument(f"--lang={random.choice(languages)}")
+
+        # Cache and cookie handling
         self.setup_browser_cache(co, run_path=run_path)
-
         co.set_timeouts(self.element_wait_timeout)
 
-        # custom user-agent is only needed for headless but why not make it consistent.
-        co.set_user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
-        )
+        # Randomized but realistic user agent
+        platforms = ['Windows NT 10.0', 'Windows NT 11.0', 'Macintosh; Intel Mac OS X 10_15_7']
+        chrome_versions = ['114.0.0.0', '115.0.0.0', '116.0.0.0']
+        ua = f"Mozilla/5.0 ({random.choice(platforms)}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{random.choice(chrome_versions)} Safari/537.36"
+        co.set_user_agent(ua)
 
         if self.headless:
             co.set_argument("--headless=new")
+            # Additional headers to make headless more like regular Chrome
+            co.set_argument("--disable-gpu")
+            co.set_argument("--no-sandbox")
+            co.set_argument("--disable-dev-shm-usage")
         elif self.config.getboolean("default", "enable_dev_tools"):
             co.set_argument("--auto-open-devtools-for-tabs")
 
         if proxy_extension_path:
             logger.debug(f"Using proxy extension path: {proxy_extension_path}")
             co.add_extension(path=proxy_extension_path)
+            # Additional proxy settings
+            co.set_argument("--disable-proxy-bypass-list")
+            co.set_argument("--proxy-bypass-list=<-loopback>")
 
         browser = Chromium(addr_or_opts=co)
         return browser
 
     def get_browser_ip(self, tab: MixTab) -> str:
         """Get the IP address that the browser is using."""
-        url = "https://api64.ipify.org/?format=raw"
-        if tab.get(url):
-            ip = tab.ele("tag:pre").text
-            return ip
-        else:
-            self.teardown(tab, "Couldn't get browser ip!")
+        urls = [
+            "https://api64.ipify.org/?format=raw",
+            "https://api.ipify.org/?format=raw",
+            "https://checkip.amazonaws.com/"
+        ]
+        max_retries = 3
+        retry_delay = 2
+
+        for _ in range(max_retries):
+            for url in urls:
+                try:
+                    if tab.get(url):
+                        ip = tab.ele("tag:pre").text
+                        if ip and re.match(r'^[\d.]+$', ip.strip()):
+                            return ip.strip()
+                except Exception as e:
+                    logger.warning(f"Failed to get IP from {url}: {e}")
+                time.sleep(retry_delay)
+            
+        self.teardown(tab, "Couldn't get browser ip after multiple retries!")
 
     def find_element(
         self, tab: MixTab, identifier: str, teardown: bool = True
@@ -292,45 +325,71 @@ class AccountCreator:
         return tab.wait.ele_displayed("#challenge-form", timeout=5)
 
     def locate_cf_button(self, tab: MixTab) -> ChromiumElement:
-        """Finds the CF challenge button in the tab. Credit to CloudflareBypasser."""
-        button = None
-        checkbox_wait_seconds = 5
-        logger.info(
-            f"sleeping {checkbox_wait_seconds} seconds before getting CF checkbox"
-        )
-        time.sleep(checkbox_wait_seconds)
-        eles = tab.eles("tag:input")
-        for ele in eles:
-            if "name" in ele.attrs.keys() and "type" in ele.attrs.keys():
-                if "turnstile" in ele.attrs["name"] and ele.attrs["type"] == "hidden":
-                    return (
-                        ele.parent()
-                        .shadow_root.child()("tag:body")
-                        .shadow_root("tag:input")
-                    )
-        return button
+        """Finds the CF challenge button in the tab."""
+        logger.info("Looking for Cloudflare challenge elements...")
+        
+        # Wait longer initially for challenge to fully load
+        time.sleep(10)
+        
+        # Try multiple selectors that might identify the challenge elements
+        selectors = [
+            "#challenge-stage",  # Main challenge container
+            "iframe[src*='cloudflare']",  # Challenge iframe
+            "input[type='checkbox']",  # Direct checkbox
+            "#cf-challenge-running",  # Challenge running indicator
+            "#turnstile_challenge_iframe"  # Turnstile iframe
+        ]
+        
+        for selector in selectors:
+            try:
+                element = tab.wait.ele_displayed(selector, timeout=5)
+                if element:
+                    logger.info(f"Found Cloudflare element with selector: {selector}")
+                    # If it's an iframe, switch to it
+                    if element.tag == "iframe":
+                        tab.switch_to_frame(element)
+                        checkbox = tab.wait.ele_displayed("input[type='checkbox']", timeout=5)
+                        if checkbox:
+                            return checkbox
+                        tab.switch_to_default_frame()
+                    else:
+                        return element
+            except Exception as e:
+                logger.debug(f"Selector {selector} not found: {e}")
+                
+        return None
 
     def bypass_challenge(self, tab: MixTab) -> bool:
-        """Attempts to bypass the CF challenge by clicking the checkbox."""
-        sleep_seconds = 2
-        max_retries = 2
-        retry_count = 0
+        """Attempts to bypass the CF challenge."""
+        max_retries = 5
+        retry_delay = 5
+        total_wait = 60  # Maximum time to wait for challenge completion
 
-        # Poll for the CF challenge button, with a maximum retry count
-        while retry_count < max_retries:
+        for attempt in range(max_retries):
+            logger.info(f"Attempt {attempt + 1} to bypass Cloudflare challenge")
+            
             button = self.locate_cf_button(tab)
             if button:
-                logger.debug("Found CF challenge button. Clicking.")
-                button.click()
-                return tab.wait.title_change("Create a Jagex account", timeout=15)
+                try:
+                    logger.info("Clicking challenge element")
+                    button.click()
+                    
+                    # Wait for challenge to process
+                    start_time = time.time()
+                    while time.time() - start_time < total_wait:
+                        # Check for successful challenge completion
+                        if not self.check_for_challenge(tab):
+                            if tab.wait.title_is("Create a Jagex account", timeout=5):
+                                logger.info("Successfully bypassed Cloudflare challenge")
+                                return True
+                        time.sleep(5)
+                except Exception as e:
+                    logger.warning(f"Error during challenge interaction: {e}")
+            
+            logger.warning(f"Challenge bypass attempt {attempt + 1} failed, waiting {retry_delay} seconds...")
+            time.sleep(retry_delay)
 
-            logger.warning(
-                f"Couldn't find CF challenge button. Retrying in {sleep_seconds} seconds."
-            )
-            time.sleep(sleep_seconds)
-            retry_count += 1
-
-        logger.error("Max retries reached. Failed to find CF challenge button.")
+        logger.error("Failed to bypass Cloudflare challenge after maximum retries")
         return False
 
     def generate_username(self, length: int = 10) -> str:
@@ -424,7 +483,15 @@ class AccountCreator:
         registration_info = {
             "email": None, "password": self.password,
             "birthday": {"day": None, "month": None, "year": None},
-            "proxy": {"enabled": self.use_proxies, "real_ip": None, "host": None, "port": None, "username": None, "password": None},
+            "proxy": {
+                "enabled": self.use_proxies,
+                "real_ip": None,
+                "host": None,
+                "port": None,
+                "username": None,
+                "password": None,
+                "type": None  # Added proxy type field
+            },
             "2fa": {"enabled": self.set_2fa, "setup_key": None, "backup_codes": None},
             "status": "pending", "message": ""
         }
@@ -436,9 +503,9 @@ class AccountCreator:
         proxy_extension_path = None
 
         try:
-            os.makedirs(run_path, exist_ok=True) # Use exist_ok=True
+            os.makedirs(run_path, exist_ok=True)
 
-            # --- Proxy Setup ---
+            # --- Enhanced Proxy Setup ---
             if self.use_proxies:
                 proxy_extension_dir = run_path / "proxy_extension"
                 proxy = self.get_next_proxy()
@@ -447,17 +514,63 @@ class AccountCreator:
                 if len(proxy_parts) not in [2, 4]:
                     raise RegistrationError(f"Invalid proxy format: {proxy}")
 
-                proxy_host, proxy_port = proxy_parts[0], proxy_parts[1]
-                registration_info["proxy"].update({"host": proxy_host, "port": proxy_port})
+                # Parse proxy details
+                proxy_host, proxy_port = proxy_parts[0], int(proxy_parts[1])
+                
+                # Detect proxy type (SOCKS vs HTTP)
+                is_socks = any([
+                    proxy_host.lower().startswith(('socks4://', 'socks5://')),
+                    proxy_port in [1080, 4145, 9050]  # Common SOCKS ports
+                ])
+                
+                # Configure proxy type and clean up host if needed
+                if is_socks:
+                    proxy_type = "socks5"
+                    if proxy_host.startswith(('socks4://', 'socks5://')):
+                        proxy_host = proxy_host.split('://', 1)[1]
+                else:
+                    proxy_type = "http"
+
+                # Build proxy configuration
+                proxy_config = {
+                    "host": proxy_host,
+                    "port": proxy_port,
+                    "type": proxy_type
+                }
+
+                # Update registration info
+                registration_info["proxy"].update({
+                    "host": proxy_host,
+                    "port": proxy_port,
+                    "type": proxy_type
+                })
+
+                # Add authentication if provided
                 if len(proxy_parts) == 4:
                     proxy_username, proxy_password = proxy_parts[2], proxy_parts[3]
-                    registration_info["proxy"].update({"username": proxy_username, "password": proxy_password})
+                    proxy_config.update({
+                        "username": proxy_username,
+                        "password": proxy_password
+                    })
+                    registration_info["proxy"].update({
+                        "username": proxy_username,
+                        "password": proxy_password
+                    })
 
+                # Configure traffic filter with updated settings
                 filter_proxy = TrafficFilterProxy(
-                    allowed_url_patterns=["jagex", "cloudflare", "ipify"],
-                    upstream_proxy=registration_info["proxy"],
+                    allowed_url_patterns=[
+                        "jagex", "cloudflare", "ipify", "amazonaws.com", "api.ipify.org",
+                        "gstatic.com", "google.com"  # Allow some Google resources
+                    ],
+                    upstream_proxy=proxy_config
                 )
+                logger.info(f"Starting traffic filter proxy with type: {proxy_type}")
                 filter_proxy.start_daemon()
+                logger.info(f"Traffic filter proxy started on {filter_proxy.ip}:{filter_proxy.port}")
+
+                # Add delay to ensure proxy is running
+                time.sleep(2)
                 logger.info(f"Traffic filter proxy started on {filter_proxy.ip}:{filter_proxy.port}")
 
                 proxy_extension_path = create_proxy_extension(
